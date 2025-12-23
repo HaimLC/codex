@@ -88,6 +88,7 @@ use crate::error::Result as CodexResult;
 #[cfg(test)]
 use crate::exec::StreamOutput;
 use crate::exec_policy::ExecPolicyUpdateError;
+use crate::history_truncation;
 use crate::mcp::auth::compute_auth_statuses;
 use crate::mcp_connection_manager::McpConnectionManager;
 use crate::model_provider_info::CHAT_WIRE_API_DEPRECATION_SUMMARY;
@@ -1217,49 +1218,17 @@ impl Session {
                 }
                 RolloutItem::EventMsg(EventMsg::ThreadRolledBack(rollback)) => {
                     let snapshot = history.get_history();
-                    history.replace(Self::drop_last_n_user_turns_from_items(
-                        &snapshot,
-                        rollback.num_turns,
-                    ));
+                    history.replace(
+                        history_truncation::drop_last_n_user_turns_from_response_items(
+                            &snapshot,
+                            rollback.num_turns,
+                        ),
+                    );
                 }
                 _ => {}
             }
         }
         history.get_history()
-    }
-
-    fn drop_last_n_user_turns_from_items(
-        items: &[ResponseItem],
-        num_turns: u32,
-    ) -> Vec<ResponseItem> {
-        if num_turns == 0 {
-            return items.to_vec();
-        }
-
-        let mut user_positions = Vec::new();
-        for (idx, item) in items.iter().enumerate() {
-            if let ResponseItem::Message { .. } = item
-                && matches!(
-                    crate::event_mapping::parse_turn_item(item),
-                    Some(TurnItem::UserMessage(_))
-                )
-            {
-                user_positions.push(idx);
-            }
-        }
-
-        let Some(&first_user_idx) = user_positions.first() else {
-            return items.to_vec();
-        };
-
-        let n = usize::try_from(num_turns).unwrap_or(usize::MAX);
-        let cut_idx = if n >= user_positions.len() {
-            first_user_idx
-        } else {
-            user_positions[user_positions.len() - n]
-        };
-
-        items.iter().take(cut_idx).cloned().collect()
     }
 
     /// Append ResponseItems to the in-memory conversation history only.
@@ -1735,6 +1704,7 @@ mod handlers {
     use crate::codex::spawn_review_thread;
     use crate::config::Config;
     use crate::features::Feature;
+    use crate::history_truncation;
     use crate::mcp::auth::compute_auth_statuses;
     use crate::mcp::collect_mcp_snapshot_from_manager;
     use crate::review_prompts::resolve_review_request;
@@ -2093,7 +2063,8 @@ mod handlers {
         let turn_context = sess.new_default_turn_with_sub_id(sub_id).await;
 
         let snapshot = sess.clone_history().await.get_history();
-        let pruned = Session::drop_last_n_user_turns_from_items(&snapshot, num_turns);
+        let pruned =
+            history_truncation::drop_last_n_user_turns_from_response_items(&snapshot, num_turns);
         sess.replace_history(pruned).await;
         sess.recompute_token_usage(turn_context.as_ref()).await;
 
