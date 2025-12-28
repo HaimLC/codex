@@ -17,6 +17,7 @@ import sys
 from typing import Iterable, Sequence
 from urllib.parse import urlparse
 from urllib.request import urlopen
+import hashlib
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 CODEX_CLI_ROOT = SCRIPT_DIR.parent
@@ -83,6 +84,13 @@ DEFAULT_RG_TARGETS = [target for target, _ in RG_TARGET_PLATFORM_PAIRS]
 
 # urllib.request.urlopen() defaults to no timeout (can hang indefinitely), which is painful in CI.
 DOWNLOAD_TIMEOUT_SECS = 60
+
+TERMUX_REPO_BASE = "https://packages.termux.dev/apt/termux-main"
+TERMUX_PACKAGES_PATH = "dists/stable/main/binary-{arch}/Packages"
+TERMUX_ARCH_MAP = {
+    "aarch64-linux-android": "aarch64",
+    "x86_64-linux-android": "x86_64",
+}
 
 
 def _gha_enabled() -> bool:
@@ -188,6 +196,9 @@ def main() -> int:
         with _gha_group("Fetch ripgrep binaries"):
             print("Fetching ripgrep binaries...")
             fetch_rg(vendor_dir, DEFAULT_RG_TARGETS, manifest_path=RG_MANIFEST)
+            fetch_termux_rg(vendor_dir, [
+                target for target in BINARY_TARGETS if target in TERMUX_ARCH_MAP
+            ])
 
     print(f"Installed native dependencies into {vendor_dir}")
     return 0
@@ -259,6 +270,161 @@ def fetch_rg(
             print(f"  installed ripgrep for {target}")
 
     return [results[target] for target in targets]
+
+
+def fetch_termux_rg(vendor_dir: Path, targets: Sequence[str]) -> list[Path]:
+    results: dict[str, Path] = {}
+    for target in targets:
+        arch = TERMUX_ARCH_MAP.get(target)
+        if not arch:
+            continue
+        package_info = _fetch_termux_package_info(arch, "ripgrep")
+        archive_url = f"{TERMUX_REPO_BASE}/{package_info['Filename']}"
+        dest_dir = vendor_dir / target / "path"
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / "rg"
+
+        with tempfile.TemporaryDirectory(prefix="termux-rg-") as tmp_dir_str:
+            tmp_dir = Path(tmp_dir_str)
+            archive_filename = os.path.basename(urlparse(archive_url).path)
+            download_path = tmp_dir / archive_filename
+            print(f"  downloading termux ripgrep for {target} from {archive_url}", flush=True)
+            _download_file(archive_url, download_path)
+            _verify_termux_package(download_path, package_info)
+            _extract_termux_rg(download_path, dest)
+
+        dest.chmod(0o755)
+        results[target] = dest
+        print(f"  installed {dest}")
+
+    return [results[target] for target in targets if target in results]
+
+
+def _fetch_termux_package_info(arch: str, package_name: str) -> dict[str, str]:
+    url = f"{TERMUX_REPO_BASE}/{TERMUX_PACKAGES_PATH.format(arch=arch)}"
+    with urlopen(url, timeout=DOWNLOAD_TIMEOUT_SECS) as response:
+        content = response.read().decode("utf-8", errors="replace")
+
+    paragraph = _find_deb_paragraph(content, package_name)
+    if paragraph is None:
+        raise RuntimeError(f"Termux package {package_name} not found for {arch}")
+    return paragraph
+
+
+def _find_deb_paragraph(content: str, package_name: str) -> dict[str, str] | None:
+    paragraphs = content.split("\n\n")
+    for entry in paragraphs:
+        if not entry.strip():
+            continue
+        fields = _parse_deb_fields(entry)
+        if fields.get("Package") == package_name:
+            return fields
+    return None
+
+
+def _parse_deb_fields(entry: str) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    current_key: str | None = None
+    for line in entry.splitlines():
+        if not line:
+            continue
+        if line.startswith(" "):
+            if current_key is not None:
+                fields[current_key] += "\n" + line.strip()
+            continue
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        current_key = key
+        fields[key] = value.strip()
+    return fields
+
+
+def _verify_termux_package(path: Path, package_info: dict[str, str]) -> None:
+    expected_size = int(package_info.get("Size", "0"))
+    if expected_size and path.stat().st_size != expected_size:
+        raise RuntimeError(
+            f"Termux package size mismatch: expected {expected_size}, got {path.stat().st_size}"
+        )
+    expected_sha256 = package_info.get("SHA256")
+    if expected_sha256:
+        sha256 = hashlib.sha256()
+        with open(path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                sha256.update(chunk)
+        digest = sha256.hexdigest()
+        if digest != expected_sha256:
+            raise RuntimeError(
+                f"Termux package sha256 mismatch: expected {expected_sha256}, got {digest}"
+            )
+
+
+def _extract_termux_rg(deb_path: Path, dest: Path) -> None:
+    with tempfile.TemporaryDirectory(prefix="termux-rg-extract-") as tmp_dir_str:
+        tmp_dir = Path(tmp_dir_str)
+        data_archive = _extract_deb_data_archive(deb_path, tmp_dir)
+        rg_path = _extract_rg_from_data_archive(data_archive, tmp_dir)
+        dest.unlink(missing_ok=True)
+        shutil.move(str(rg_path), dest)
+
+
+def _extract_deb_data_archive(deb_path: Path, tmp_dir: Path) -> Path:
+    with open(deb_path, "rb") as handle:
+        magic = handle.read(8)
+        if magic != b"!<arch>\n":
+            raise RuntimeError(f"Invalid deb archive: {deb_path}")
+
+        while True:
+            header = handle.read(60)
+            if not header:
+                break
+            if len(header) != 60:
+                raise RuntimeError(f"Corrupt deb archive header in {deb_path}")
+
+            name = header[0:16].decode("utf-8", errors="replace").strip()
+            size = int(header[48:58].decode("utf-8", errors="replace").strip() or "0")
+            data = handle.read(size)
+            if size % 2 == 1:
+                handle.read(1)
+
+            name = name.rstrip("/")
+            if name.startswith("#1/"):
+                name_len = int(name.split("/", 1)[1])
+                actual_name = data[:name_len].decode("utf-8", errors="replace")
+                data = data[name_len:]
+                name = actual_name
+
+            if name.startswith("data.tar"):
+                output_path = tmp_dir / name
+                output_path.write_bytes(data)
+                return output_path
+
+    raise RuntimeError(f"data.tar archive not found in {deb_path}")
+
+
+def _extract_rg_from_data_archive(data_archive: Path, tmp_dir: Path) -> Path:
+    if data_archive.suffixes[-2:] == [".tar", ".xz"]:
+        mode = "r:xz"
+    elif data_archive.suffixes[-2:] == [".tar", ".gz"]:
+        mode = "r:gz"
+    elif data_archive.suffixes[-2:] == [".tar", ".bz2"]:
+        mode = "r:bz2"
+    else:
+        raise RuntimeError(f"Unsupported termux data archive format: {data_archive}")
+
+    with tarfile.open(data_archive, mode) as archive:
+        candidate = None
+        for member in archive.getmembers():
+            if member.isfile() and member.name.endswith("/bin/rg"):
+                candidate = member
+                break
+        if candidate is None:
+            raise RuntimeError("rg not found in termux package data archive")
+
+        extracted_path = tmp_dir / "rg"
+        with archive.extractfile(candidate) as src, open(extracted_path, "wb") as dest:
+            shutil.copyfileobj(src, dest)
+        return extracted_path
 
 
 def _download_artifacts(workflow_id: str, dest_dir: Path) -> None:
