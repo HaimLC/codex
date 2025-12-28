@@ -1,3 +1,5 @@
+use anyhow::Context;
+use anyhow::anyhow;
 use codex_core::MCP_SANDBOX_STATE_METHOD;
 use codex_core::SandboxState;
 use codex_core::protocol::SandboxPolicy;
@@ -47,7 +49,8 @@ where
 
     // Need to ensure the artifact associated with the bash DotSlash file is
     // available before it is run in a read-only sandbox.
-    let status = Command::new("dotslash")
+    let dotslash = resolve_dotslash()?;
+    let status = Command::new(&dotslash)
         .arg("--")
         .arg("fetch")
         .arg(bash.clone())
@@ -56,11 +59,13 @@ where
         .await?;
     assert!(status.success(), "dotslash fetch failed: {status:?}");
 
+    let updated_path = prepend_path(dotslash.parent(), std::env::var_os("PATH"));
     let transport = TokioChildProcess::new(Command::new(&mcp_executable).configure(|cmd| {
         cmd.arg("--bash").arg(bash);
         cmd.arg("--execve").arg(&execve_wrapper);
         cmd.env("CODEX_HOME", codex_home.as_ref());
         cmd.env("DOTSLASH_CACHE", dotslash_cache.as_ref());
+        cmd.env("PATH", &updated_path);
 
         // Important: pipe stdio so rmcp can speak JSON-RPC over stdin/stdout
         cmd.stdin(Stdio::piped());
@@ -71,6 +76,50 @@ where
     }))?;
 
     Ok(transport)
+}
+
+fn prepend_path(
+    new_dir: Option<&Path>,
+    existing: Option<std::ffi::OsString>,
+) -> std::ffi::OsString {
+    let mut parts: Vec<std::ffi::OsString> = Vec::new();
+    if let Some(new_dir) = new_dir {
+        parts.push(new_dir.as_os_str().to_os_string());
+    }
+    if let Some(existing) = existing {
+        for entry in std::env::split_paths(&existing) {
+            parts.push(entry.as_os_str().to_os_string());
+        }
+    }
+    std::env::join_paths(parts).unwrap_or_default()
+}
+
+fn resolve_dotslash() -> anyhow::Result<PathBuf> {
+    // First try to find it in PATH
+    if let Ok(path) = which::which("dotslash") {
+        return Ok(path);
+    }
+
+    // Then try CARGO_HOME
+    if let Some(cargo_home) = std::env::var_os("CARGO_HOME") {
+        let candidate = PathBuf::from(cargo_home).join("bin").join("dotslash");
+        if candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+
+    // Then try ~/.cargo/bin
+    if let Some(home) = dirs::home_dir() {
+        let candidate = home.join(".cargo").join("bin").join("dotslash");
+        if candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+
+    Err(anyhow!(
+        "dotslash not found on PATH or in ~/.cargo/bin; install it to run exec-server tests"
+    ))
+    .context("unable to locate dotslash")
 }
 
 pub async fn write_default_execpolicy<P>(policy: &str, codex_home: P) -> anyhow::Result<()>
