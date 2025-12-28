@@ -2,60 +2,83 @@
 // Entry point for the Codex responses API proxy binary.
 
 import { spawn } from "node:child_process";
+import { existsSync } from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-function determineTargetTriple(platform, arch) {
+function targetCandidates(platform, arch) {
   switch (platform) {
-    case "linux":
     case "android":
+      if (arch === "arm64") {
+        return ["aarch64-linux-android", "aarch64-unknown-linux-musl"];
+      }
       if (arch === "x64") {
-        return "x86_64-unknown-linux-musl";
+        return ["x86_64-linux-android", "x86_64-unknown-linux-musl"];
+      }
+      return [];
+    case "linux":
+      if (arch === "x64") {
+        return ["x86_64-unknown-linux-musl"];
       }
       if (arch === "arm64") {
-        return "aarch64-unknown-linux-musl";
+        return ["aarch64-unknown-linux-musl"];
       }
-      break;
+      return [];
     case "darwin":
       if (arch === "x64") {
-        return "x86_64-apple-darwin";
+        return ["x86_64-apple-darwin"];
       }
       if (arch === "arm64") {
-        return "aarch64-apple-darwin";
+        return ["aarch64-apple-darwin"];
       }
-      break;
+      return [];
     case "win32":
       if (arch === "x64") {
-        return "x86_64-pc-windows-msvc";
+        return ["x86_64-pc-windows-msvc"];
       }
       if (arch === "arm64") {
-        return "aarch64-pc-windows-msvc";
+        return ["aarch64-pc-windows-msvc"];
       }
-      break;
+      return [];
     default:
-      break;
+      return [];
   }
-  return null;
 }
 
-const targetTriple = determineTargetTriple(process.platform, process.arch);
-if (!targetTriple) {
+const candidateTargets = targetCandidates(process.platform, process.arch);
+if (candidateTargets.length === 0) {
   throw new Error(
     `Unsupported platform: ${process.platform} (${process.arch})`,
   );
 }
 
 const vendorRoot = path.join(__dirname, "..", "vendor");
-const archRoot = path.join(vendorRoot, targetTriple);
 const binaryBaseName = "codex-responses-api-proxy";
-const binaryPath = path.join(
-  archRoot,
-  binaryBaseName,
-  process.platform === "win32" ? `${binaryBaseName}.exe` : binaryBaseName,
-);
+const binaryName =
+  process.platform === "win32" ? `${binaryBaseName}.exe` : binaryBaseName;
+let binaryPath = null;
+for (const targetTriple of candidateTargets) {
+  const candidatePath = path.join(
+    vendorRoot,
+    targetTriple,
+    binaryBaseName,
+    binaryName,
+  );
+  if (existsSync(candidatePath)) {
+    binaryPath = candidatePath;
+    break;
+  }
+}
+
+if (!binaryPath) {
+  throw new Error(
+    `Codex responses API proxy binary not found for ${process.platform} (${process.arch}). ` +
+      `Searched: ${candidateTargets.join(", ")}`,
+  );
+}
 
 const child = spawn(binaryPath, process.argv.slice(2), {
   stdio: "inherit",

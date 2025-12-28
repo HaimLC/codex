@@ -69,10 +69,14 @@ jobs:
             target: x86_64-unknown-linux-musl
           - runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04
+            target: x86_64-linux-android
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
+          - runner: ubuntu-24.04
+            target: aarch64-linux-android
           - runner: windows-latest
             target: x86_64-pc-windows-msvc
           - runner: windows-11-arm
@@ -99,6 +103,31 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y musl-tools pkg-config
+
+      - if: ${{ contains(matrix.target, 'linux-android') }}
+        name: Setup Android NDK
+        uses: android-actions/setup-android@v3
+        with:
+          ndk-version: 27.2.12479018
+
+      - if: ${{ contains(matrix.target, 'linux-android') }}
+        name: Configure Android NDK toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          ndk="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}"
+          if [[ -z "$ndk" ]]; then
+            echo "ANDROID_NDK_HOME not set"
+            exit 1
+          fi
+          toolchain="$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          api=21
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$toolchain/aarch64-linux-android${api}-clang" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER=$toolchain/x86_64-linux-android${api}-clang" >> "$GITHUB_ENV"
+          echo "CC_aarch64_linux_android=$toolchain/aarch64-linux-android${api}-clang" >> "$GITHUB_ENV"
+          echo "CC_x86_64_linux_android=$toolchain/x86_64-linux-android${api}-clang" >> "$GITHUB_ENV"
+          echo "AR_aarch64_linux_android=$toolchain/llvm-ar" >> "$GITHUB_ENV"
+          echo "AR_x86_64_linux_android=$toolchain/llvm-ar" >> "$GITHUB_ENV"
 
       - name: Cargo build
         shell: bash

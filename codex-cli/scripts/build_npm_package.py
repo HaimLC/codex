@@ -273,6 +273,8 @@ def copy_native_binaries(
 
             src_component_dir = target_dir / dest_dir_name
             if not src_component_dir.exists():
+                if component == "rg" and "android" in target_dir.name:
+                    continue
                 raise RuntimeError(
                     f"Missing native component '{component}' in vendor source: {src_component_dir}"
                 )

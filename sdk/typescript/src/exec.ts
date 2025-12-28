@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
@@ -197,57 +198,65 @@ const scriptDirName = path.dirname(scriptFileName);
 function findCodexPath() {
   const { platform, arch } = process;
 
-  let targetTriple = null;
-  switch (platform) {
-    case "linux":
-    case "android":
-      switch (arch) {
-        case "x64":
-          targetTriple = "x86_64-unknown-linux-musl";
-          break;
-        case "arm64":
-          targetTriple = "aarch64-unknown-linux-musl";
-          break;
-        default:
-          break;
-      }
-      break;
-    case "darwin":
-      switch (arch) {
-        case "x64":
-          targetTriple = "x86_64-apple-darwin";
-          break;
-        case "arm64":
-          targetTriple = "aarch64-apple-darwin";
-          break;
-        default:
-          break;
-      }
-      break;
-    case "win32":
-      switch (arch) {
-        case "x64":
-          targetTriple = "x86_64-pc-windows-msvc";
-          break;
-        case "arm64":
-          targetTriple = "aarch64-pc-windows-msvc";
-          break;
-        default:
-          break;
-      }
-      break;
-    default:
-      break;
-  }
+  const candidateTargets = (() => {
+    switch (platform) {
+      case "android":
+        if (arch === "arm64") {
+          return ["aarch64-linux-android", "aarch64-unknown-linux-musl"];
+        }
+        if (arch === "x64") {
+          return ["x86_64-linux-android", "x86_64-unknown-linux-musl"];
+        }
+        return [];
+      case "linux":
+        if (arch === "x64") {
+          return ["x86_64-unknown-linux-musl"];
+        }
+        if (arch === "arm64") {
+          return ["aarch64-unknown-linux-musl"];
+        }
+        return [];
+      case "darwin":
+        if (arch === "x64") {
+          return ["x86_64-apple-darwin"];
+        }
+        if (arch === "arm64") {
+          return ["aarch64-apple-darwin"];
+        }
+        return [];
+      case "win32":
+        if (arch === "x64") {
+          return ["x86_64-pc-windows-msvc"];
+        }
+        if (arch === "arm64") {
+          return ["aarch64-pc-windows-msvc"];
+        }
+        return [];
+      default:
+        return [];
+    }
+  })();
 
-  if (!targetTriple) {
+  if (candidateTargets.length === 0) {
     throw new Error(`Unsupported platform: ${platform} (${arch})`);
   }
 
   const vendorRoot = path.join(scriptDirName, "..", "vendor");
-  const archRoot = path.join(vendorRoot, targetTriple);
   const codexBinaryName = process.platform === "win32" ? "codex.exe" : "codex";
-  const binaryPath = path.join(archRoot, "codex", codexBinaryName);
+  for (const targetTriple of candidateTargets) {
+    const binaryPath = path.join(
+      vendorRoot,
+      targetTriple,
+      "codex",
+      codexBinaryName,
+    );
+    if (existsSync(binaryPath)) {
+      return binaryPath;
+    }
+  }
 
-  return binaryPath;
+  throw new Error(
+    `Codex binary not found for ${platform} (${arch}). ` +
+      `Searched: ${candidateTargets.join(", ")}`,
+  );
 }

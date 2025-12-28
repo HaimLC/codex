@@ -12,57 +12,78 @@ const __dirname = path.dirname(__filename);
 
 const { platform, arch } = process;
 
-let targetTriple = null;
-switch (platform) {
-  case "linux":
-  case "android":
-    switch (arch) {
-      case "x64":
-        targetTriple = "x86_64-unknown-linux-musl";
-        break;
-      case "arm64":
-        targetTriple = "aarch64-unknown-linux-musl";
-        break;
-      default:
-        break;
-    }
-    break;
-  case "darwin":
-    switch (arch) {
-      case "x64":
-        targetTriple = "x86_64-apple-darwin";
-        break;
-      case "arm64":
-        targetTriple = "aarch64-apple-darwin";
-        break;
-      default:
-        break;
-    }
-    break;
-  case "win32":
-    switch (arch) {
-      case "x64":
-        targetTriple = "x86_64-pc-windows-msvc";
-        break;
-      case "arm64":
-        targetTriple = "aarch64-pc-windows-msvc";
-        break;
-      default:
-        break;
-    }
-    break;
-  default:
-    break;
+function targetCandidates(platformValue, archValue) {
+  switch (platformValue) {
+    case "android":
+      switch (archValue) {
+        case "arm64":
+          return ["aarch64-linux-android", "aarch64-unknown-linux-musl"];
+        case "x64":
+          return ["x86_64-linux-android", "x86_64-unknown-linux-musl"];
+        default:
+          return [];
+      }
+    case "linux":
+      switch (archValue) {
+        case "x64":
+          return ["x86_64-unknown-linux-musl"];
+        case "arm64":
+          return ["aarch64-unknown-linux-musl"];
+        default:
+          return [];
+      }
+    case "darwin":
+      switch (archValue) {
+        case "x64":
+          return ["x86_64-apple-darwin"];
+        case "arm64":
+          return ["aarch64-apple-darwin"];
+        default:
+          return [];
+      }
+    case "win32":
+      switch (archValue) {
+        case "x64":
+          return ["x86_64-pc-windows-msvc"];
+        case "arm64":
+          return ["aarch64-pc-windows-msvc"];
+        default:
+          return [];
+      }
+    default:
+      return [];
+  }
 }
 
-if (!targetTriple) {
+const candidateTargets = targetCandidates(platform, arch);
+if (candidateTargets.length === 0) {
   throw new Error(`Unsupported platform: ${platform} (${arch})`);
 }
 
 const vendorRoot = path.join(__dirname, "..", "vendor");
-const archRoot = path.join(vendorRoot, targetTriple);
 const codexBinaryName = process.platform === "win32" ? "codex.exe" : "codex";
-const binaryPath = path.join(archRoot, "codex", codexBinaryName);
+let archRoot = null;
+let binaryPath = null;
+for (const targetTriple of candidateTargets) {
+  const candidateArchRoot = path.join(vendorRoot, targetTriple);
+  const candidateBinaryPath = path.join(
+    candidateArchRoot,
+    "codex",
+    codexBinaryName,
+  );
+  if (existsSync(candidateBinaryPath)) {
+    archRoot = candidateArchRoot;
+    binaryPath = candidateBinaryPath;
+    break;
+  }
+}
+
+if (!binaryPath || !archRoot) {
+  throw new Error(
+    `Codex binary not found for ${platform} (${arch}). ` +
+      `Searched: ${candidateTargets.join(", ")}`,
+  );
+}
 
 // Use an asynchronous spawn instead of spawnSync so that Node is able to
 // respond to signals (e.g. Ctrl-C / SIGINT) while the native binary is
